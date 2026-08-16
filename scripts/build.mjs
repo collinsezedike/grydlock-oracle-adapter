@@ -27,7 +27,7 @@
  */
 import { build } from 'esbuild';
 import { execFileSync } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 
 rmSync('dist', { recursive: true, force: true });
 
@@ -44,11 +44,28 @@ const shared = {
   logLevel: 'info',
 };
 
-await build({ ...shared, format: 'esm', outfile: 'dist/esm/index.js' });
-await build({ ...shared, format: 'cjs', outfile: 'dist/cjs/index.js' });
+// The two builds share no state (different outfiles, same config), so run
+// them concurrently rather than serializing on each other.
+await Promise.all([
+  build({ ...shared, format: 'esm', outfile: 'dist/esm/index.js' }),
+  build({ ...shared, format: 'cjs', outfile: 'dist/cjs/index.js' }),
+]);
+
+// The root package.json has no top-level "type", so without these, Node
+// can't tell dist/esm/index.js's format from package.json alone — it falls
+// back to sniffing the file's contents at runtime (a real, measurable
+// startup cost) and prints a MODULE_TYPELESS_PACKAGE_JSON warning. Each
+// dist/ subfolder gets its own package.json declaring its actual format,
+// the standard fix for a dual CJS/ESM package.
+mkdirSync('dist/esm', { recursive: true });
+mkdirSync('dist/cjs', { recursive: true });
+writeFileSync('dist/esm/package.json', JSON.stringify({ type: 'module' }, null, 2) + '\n');
+writeFileSync('dist/cjs/package.json', JSON.stringify({ type: 'commonjs' }, null, 2) + '\n');
 
 // esbuild does not emit type declarations; tsc does, from the same source,
-// mirroring src/'s module structure under dist/types/.
-execFileSync('npx', ['tsc', '-p', 'tsconfig.types.json'], { stdio: 'inherit', shell: true });
+// mirroring src/'s module structure under dist/types/. Passed as a single
+// command string (not a separate args array) so shell:true doesn't trip
+// Node's DEP0190 warning about unescaped shell arguments.
+execFileSync('npx tsc -p tsconfig.types.json', { stdio: 'inherit', shell: true });
 
 console.log('\nBuild complete: dist/esm, dist/cjs, dist/types');
