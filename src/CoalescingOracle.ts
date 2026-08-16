@@ -1,5 +1,16 @@
 import { RiskOracle } from './RiskOracle';
 import { Logger, noopLogger } from './Logger';
+import { CancellableRiskOracle, isCancellable } from './CancellableRiskOracle';
+import { OracleCancelledError } from './OracleError';
+
+/** Bookkeeping for one in-flight cancellable request, shared by every caller coalesced onto it. */
+interface CancellableInFlightEntry {
+  promise: Promise<number>;
+  /** Controls the *shared* underlying call — aborted only once every attached caller has cancelled. */
+  controller: AbortController;
+  /** Count of callers currently coalesced on `promise` that have not yet cancelled. */
+  attachedCount: number;
+}
 
 /**
  * Decorator that de-duplicates concurrent `getScore(destination)` calls.
@@ -23,9 +34,27 @@ import { Logger, noopLogger } from './Logger';
  *   one call to `this.inner.getScore` is in flight at a time; all coalesced
  *   callers observe the same settlement (same value on success, same error
  *   object on failure, via reference equality) as that one call.
+ *
+ * ## Cancellation (issue #98)
+ *
+ * `getScoreCancellable` maintains its own, entirely separate coalescing pool
+ * from `getScore` — a cancellable and a non-cancellable call for the same
+ * destination do not coalesce onto each other. A plain `getScore` caller has
+ * no signal and so could never contribute to "every attached caller has
+ * cancelled"; sharing the pools would mean a single non-cancellable caller
+ * permanently prevents the shared request from ever being real-aborted,
+ * which defeats the point. Keeping them separate also means `getScore` and
+ * its documented invariants above are completely unchanged by this feature.
+ *
+ * Multiple callers can coalesce onto one shared underlying cancellable call.
+ * One caller cancelling must not affect callers still waiting — only once
+ * *every* currently-attached caller has cancelled is the shared call's own
+ * `AbortController` actually aborted, so the resource is freed but a lone
+ * still-interested caller is never starved by someone else's cancellation.
  */
-export class CoalescingOracle implements RiskOracle {
+export class CoalescingOracle implements RiskOracle, CancellableRiskOracle {
   private readonly inFlightByDestination = new Map<string, Promise<number>>();
+  private readonly cancellableInFlightByDestination = new Map<string, CancellableInFlightEntry>();
 
   constructor(
     private readonly inner: RiskOracle,
@@ -60,6 +89,79 @@ export class CoalescingOracle implements RiskOracle {
     return p;
   }
 
+  /**
+   * Cancellable counterpart to {@link getScore} — see the class doc's
+   * "Cancellation" section for the coalescing/abort semantics.
+   */
+  getScoreCancellable(destination: string, signal: AbortSignal): Promise<number> {
+    if (signal.aborted) {
+      return Promise.reject(new OracleCancelledError('The oracle request was cancelled.', { destination }));
+    }
+
+    let entry = this.cancellableInFlightByDestination.get(destination);
+    if (!entry) {
+      this.logger.debug('CoalescingOracle.cancellableInFlightStart', { destination });
+      const controller = new AbortController();
+      const promise = isCancellable(this.inner)
+        ? this.inner.getScoreCancellable(destination, controller.signal)
+        : this.inner.getScore(destination);
+      const newEntry: CancellableInFlightEntry = { promise, controller, attachedCount: 0 };
+      entry = newEntry;
+      this.cancellableInFlightByDestination.set(destination, newEntry);
+
+      // Top-level bookkeeping chain, attached synchronously (INV-CO-1),
+      // independent of any individual caller's own race below — mirrors
+      // getScore's p.then(...) above.
+      promise.then(
+        () => this.clearCancellableInFlight(destination, newEntry),
+        (err) => {
+          this.clearCancellableInFlight(destination, newEntry);
+          this.logger.warn('CoalescingOracle.cancellableInnerFailed', { destination, err });
+        },
+      );
+    } else {
+      this.logger.debug('CoalescingOracle.cancellableCoalesced', { destination });
+    }
+
+    const attachedEntry = entry;
+    attachedEntry.attachedCount++;
+
+    return new Promise<number>((resolve, reject) => {
+      let settled = false;
+      const onAbort = (): void => {
+        if (settled) return;
+        settled = true;
+        attachedEntry.attachedCount--;
+        if (attachedEntry.attachedCount === 0) {
+          // Last attached caller cancelled: actually free the resource, and
+          // remove the entry immediately rather than waiting for `promise`
+          // to settle from the abort — otherwise a new caller arriving in
+          // that window would coalesce onto an already-doomed request.
+          attachedEntry.controller.abort();
+          this.clearCancellableInFlight(destination, attachedEntry);
+        }
+        signal.removeEventListener('abort', onAbort);
+        reject(new OracleCancelledError('The oracle request was cancelled.', { destination }));
+      };
+      signal.addEventListener('abort', onAbort);
+
+      attachedEntry.promise.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        },
+        (err: unknown) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', onAbort);
+          reject(err);
+        },
+      );
+    });
+  }
+
   private clearInFlight(destination: string, p: Promise<number>): void {
     // Only delete if it's still the same promise instance: a later call for
     // the same destination may already have installed a fresh in-flight
@@ -67,6 +169,13 @@ export class CoalescingOracle implements RiskOracle {
     if (this.inFlightByDestination.get(destination) === p) {
       this.inFlightByDestination.delete(destination);
       this.logger.debug('CoalescingOracle.inFlightEnd', { destination });
+    }
+  }
+
+  private clearCancellableInFlight(destination: string, entry: CancellableInFlightEntry): void {
+    if (this.cancellableInFlightByDestination.get(destination) === entry) {
+      this.cancellableInFlightByDestination.delete(destination);
+      this.logger.debug('CoalescingOracle.cancellableInFlightEnd', { destination });
     }
   }
 }
