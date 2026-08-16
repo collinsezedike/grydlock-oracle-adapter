@@ -1,7 +1,7 @@
 import { RiskOracle } from '../RiskOracle';
 import { OracleMiddleware } from '../OracleMiddleware';
-import { OracleTimeoutError } from '../OracleError';
-import { isCancellable } from '../CancellableRiskOracle';
+import { OracleTimeoutError, OracleCancelledError } from '../OracleError';
+import { CancellableRiskOracle, isCancellable } from '../CancellableRiskOracle';
 
 export { OracleTimeoutError };
 
@@ -34,10 +34,21 @@ export interface TimeoutOptions {
  * merely being abandoned. When `next` does not support cancellation, the
  * losing call cannot be truly cancelled; it is detached and its eventual
  * settlement silenced, exactly as before #98.
+ *
+ * The returned oracle also implements `CancellableRiskOracle` itself, via
+ * `getScoreCancellable` (issue #98): a caller can cancel from *outside*,
+ * not just via this middleware's own timeout, and — critically — an outer
+ * cancellable-aware wrapper (`CoalescingOracle`, `CircuitBreakerOracle`,
+ * `FallbackOracle`) composing `withTimeout` as one of its tiers can
+ * propagate cancellation *through* it into `next`, since `isCancellable()`
+ * now reports `true` for `withTimeout`'s own output. Without this, a chain
+ * like `fallback(withTimeout(cancellableInner))` would never actually abort
+ * `cancellableInner` on outer cancellation — `withTimeout`'s wrapper would
+ * look like a plain, non-cancellable oracle to everything wrapping it.
  */
 export function withTimeout(options: TimeoutOptions): OracleMiddleware {
   const { timeoutMs } = options;
-  return (next: RiskOracle): RiskOracle => ({
+  return (next: RiskOracle): RiskOracle & CancellableRiskOracle => ({
     async getScore(destination: string): Promise<number> {
       const controller = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -68,6 +79,59 @@ export function withTimeout(options: TimeoutOptions): OracleMiddleware {
       } finally {
         clearTimeout(timer);
       }
+    },
+
+    getScoreCancellable(destination: string, signal: AbortSignal): Promise<number> {
+      if (signal.aborted) {
+        return Promise.reject(new OracleCancelledError('The oracle request was cancelled.', { destination }));
+      }
+
+      const controller = new AbortController();
+      const inner = isCancellable(next)
+        ? next.getScoreCancellable(destination, controller.signal)
+        : next.getScore(destination);
+
+      const result = new Promise<number>((resolve, reject) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+
+        const finish = (fn: () => void): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal.removeEventListener('abort', onExternalAbort);
+          fn();
+        };
+
+        const onExternalAbort = (): void => {
+          controller.abort();
+          finish(() =>
+            reject(new OracleCancelledError('The oracle request was cancelled.', { destination })),
+          );
+        };
+        signal.addEventListener('abort', onExternalAbort, { once: true });
+
+        timer = setTimeout(() => {
+          controller.abort();
+          finish(() =>
+            reject(new OracleTimeoutError(`getScore("${destination}") timed out after ${timeoutMs}ms`)),
+          );
+        }, timeoutMs);
+
+        inner.then(
+          (value) => finish(() => resolve(value)),
+          (err: unknown) => finish(() => reject(err)),
+        );
+      });
+
+      // Same unhandled-rejection guard as getScore above: an abandoned
+      // `inner` (cancelled or timed out) may still settle later.
+      return result.catch((err: unknown) => {
+        if (err instanceof OracleTimeoutError || err instanceof OracleCancelledError) {
+          inner.catch(() => {});
+        }
+        throw err;
+      });
     },
   });
 }
