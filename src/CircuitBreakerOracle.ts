@@ -1,5 +1,5 @@
 import { RiskOracle } from './RiskOracle';
-import { CancellableRiskOracle, isCancellable } from './CancellableRiskOracle';
+import { CancellableRiskOracle, isCancellable, raceWithCancellation } from './CancellableRiskOracle';
 import { OracleCancelledError } from './OracleError';
 
 /** Lifecycle state of a {@link CircuitBreakerOracle}. */
@@ -163,18 +163,18 @@ export class CircuitBreakerOracle implements RiskOracle, CancellableRiskOracle {
 
     if (this.state === CircuitBreakerState.OPEN) {
       if (Date.now() < this.nextAttempt) {
-        return this.raceWithCancellation(this.handleFallback(destination), destination, signal);
+        return raceWithCancellation(this.handleFallback(destination), signal, destination);
       }
 
       // Same synchronous claim as getScore's OPEN branch (INV-CB-2): no
       // await between the eligibility check and this mutation.
       this.state = CircuitBreakerState.HALF_OPEN;
       this.halfOpenProbe = this.runProbe(destination);
-      return this.raceWithCancellation(this.halfOpenProbe, destination, signal);
+      return raceWithCancellation(this.halfOpenProbe, signal, destination);
     }
 
     if (this.state === CircuitBreakerState.HALF_OPEN) {
-      await this.raceWithCancellation(this.halfOpenProbe!.catch(() => undefined), destination, signal);
+      await raceWithCancellation(this.halfOpenProbe!.catch(() => undefined), signal, destination);
       return this.getScoreCancellable(destination, signal);
     }
 
@@ -184,7 +184,7 @@ export class CircuitBreakerOracle implements RiskOracle, CancellableRiskOracle {
     try {
       const score = isCancellable(this.oracle)
         ? await this.oracle.getScoreCancellable(destination, signal)
-        : await this.raceWithCancellation(this.oracle.getScore(destination), destination, signal);
+        : await raceWithCancellation(this.oracle.getScore(destination), signal, destination);
       return score;
     } catch (error) {
       if (error instanceof OracleCancelledError) {
@@ -196,44 +196,6 @@ export class CircuitBreakerOracle implements RiskOracle, CancellableRiskOracle {
       }
       throw error;
     }
-  }
-
-  /**
-   * Races `promise` against `signal`'s own abort event, without affecting
-   * `promise` itself — used where `promise` may be a resource shared with
-   * other callers (the HALF_OPEN probe) that this caller alone must not be
-   * able to tear down.
-   */
-  private raceWithCancellation<T>(
-    promise: Promise<T>,
-    destination: string,
-    signal: AbortSignal,
-  ): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const onAbort = (): void => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener('abort', onAbort);
-        reject(new OracleCancelledError('The oracle request was cancelled.', { destination }));
-      };
-      signal.addEventListener('abort', onAbort);
-
-      promise.then(
-        (value) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', onAbort);
-          resolve(value);
-        },
-        (err: unknown) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', onAbort);
-          reject(err);
-        },
-      );
-    });
   }
 
   /**

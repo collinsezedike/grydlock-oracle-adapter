@@ -1,7 +1,7 @@
 import { CircuitBreakerState } from './CircuitBreakerOracle';
 import { CacheStatus, DetailedRiskOracle, RiskOracle, ScoredResult } from './RiskOracle';
 import { FallbackObserver } from './FallbackObserver';
-import { CancellableRiskOracle, isCancellable } from './CancellableRiskOracle';
+import { CancellableRiskOracle, isCancellable, raceWithCancellation } from './CancellableRiskOracle';
 import { OracleCancelledError } from './OracleError';
 
 /**
@@ -186,41 +186,6 @@ export class FallbackOracle implements DetailedRiskOracle, CancellableRiskOracle
     return result.score;
   }
 
-  /**
-   * Races `promise` against `signal`'s own abort event, without affecting
-   * `promise` itself — used for a tier that doesn't implement
-   * `CancellableRiskOracle`, so the caller can still bail out immediately
-   * even though that tier's own call keeps running until it settles on its
-   * own.
-   */
-  private raceWithCancellation<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const onAbort = (): void => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener('abort', onAbort);
-        reject(new OracleCancelledError('The oracle request was cancelled.'));
-      };
-      signal.addEventListener('abort', onAbort);
-
-      promise.then(
-        (value) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', onAbort);
-          resolve(value);
-        },
-        (err: unknown) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', onAbort);
-          reject(err);
-        },
-      );
-    });
-  }
-
   /** Decays every tier's belief one round, then ranks tiers richest-first by UCB index. */
   private rankTiers(): TierRoutingDecision[] {
     for (const belief of this.beliefs) {
@@ -363,7 +328,7 @@ export class FallbackOracle implements DetailedRiskOracle, CancellableRiskOracle
       try {
         const score = isCancellable(oracle)
           ? await oracle.getScoreCancellable(destination, signal)
-          : await this.raceWithCancellation(oracle.getScore(destination), signal);
+          : await raceWithCancellation(oracle.getScore(destination), signal, destination);
         // Detailed cacheStatus is not available through the cancellable
         // path (CancellableRiskOracle has no detailed variant); defaults
         // to 'live', matching route()'s own default for non-detailed tiers.
