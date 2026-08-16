@@ -163,7 +163,7 @@ export class CircuitBreakerOracle implements RiskOracle, CancellableRiskOracle {
 
     if (this.state === CircuitBreakerState.OPEN) {
       if (Date.now() < this.nextAttempt) {
-        return this.handleFallback(destination);
+        return this.raceWithCancellation(this.handleFallback(destination), destination, signal);
       }
 
       // Same synchronous claim as getScore's OPEN branch (INV-CB-2): no
