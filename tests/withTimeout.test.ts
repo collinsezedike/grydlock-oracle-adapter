@@ -3,6 +3,8 @@ import { OracleTimeoutError, withTimeout } from '../src/middleware/withTimeout';
 import { withCache } from '../src/middleware/withCache';
 import { compose } from '../src/OracleMiddleware';
 import { RiskOracle } from '../src/RiskOracle';
+import { CancellableRiskOracle } from '../src/CancellableRiskOracle';
+import { OracleCancelledError } from '../src/OracleError';
 
 function delayedOracle(score: number, delayMs: number): RiskOracle {
   return {
@@ -10,6 +12,33 @@ function delayedOracle(score: number, delayMs: number): RiskOracle {
       new Promise((resolve) => {
         setTimeout(() => resolve(score), delayMs);
       }),
+  };
+}
+
+/**
+ * Cancellable oracle that never settles on its own — only on abort — so
+ * these tests can observe whether a timeout actually aborts it, rather
+ * than merely racing ahead of a call that would settle anyway.
+ */
+function neverSettlingCancellableOracle(): CancellableRiskOracle & { wasAborted: () => boolean } {
+  let aborted = false;
+  return {
+    async getScore() {
+      throw new Error('not used in these tests');
+    },
+    getScoreCancellable(destination: string, signal: AbortSignal) {
+      return new Promise<number>((_resolve, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            aborted = true;
+            reject(new OracleCancelledError('cancelled', { destination }));
+          },
+          { once: true },
+        );
+      });
+    },
+    wasAborted: () => aborted,
   };
 }
 
@@ -87,6 +116,30 @@ describe('withTimeout', () => {
     } finally {
       process.off('unhandledRejection', listener);
     }
+  });
+
+  it('issue #98: aborts a cancellable inner oracle on timeout instead of merely detaching from it', async () => {
+    const inner = neverSettlingCancellableOracle();
+    const oracle = withTimeout({ timeoutMs: 1000 })(inner);
+
+    const pending = oracle.getScore('GDEST');
+    const assertion = expect(pending).rejects.toThrow(OracleTimeoutError);
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+
+    expect(inner.wasAborted()).toBe(true);
+  });
+
+  it('issue #98: does not touch a non-cancellable inner oracle beyond detaching from it (unchanged behavior)', async () => {
+    const oracle = withTimeout({ timeoutMs: 1000 })(delayedOracle(42, 5000));
+
+    const pending = oracle.getScore('GDEST');
+    const assertion = expect(pending).rejects.toThrow(OracleTimeoutError);
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+
+    // The abandoned call still settles on its own later — nothing throws.
+    await vi.advanceTimersByTimeAsync(4000);
   });
 });
 
