@@ -1,6 +1,7 @@
 import { RiskOracle } from '../RiskOracle';
 import { OracleMiddleware } from '../OracleMiddleware';
 import { OracleTimeoutError } from '../OracleError';
+import { isCancellable } from '../CancellableRiskOracle';
 
 export { OracleTimeoutError };
 
@@ -27,36 +28,40 @@ export interface TimeoutOptions {
  * budget bounds exactly one underlying attempt — with retry (#10) outside,
  * each attempt gets its own budget instead of all attempts sharing one.
  *
- * The RiskOracle interface does not yet accept an AbortSignal, so the
- * losing underlying call cannot be truly cancelled; it is detached and its
- * eventual failure silenced. When #7 lands signal support on the interface,
- * this middleware is where the AbortController belongs.
+ * When `next` implements `CancellableRiskOracle` (issue #98), a timeout
+ * both rejects the caller *and* aborts the underlying request via
+ * `AbortController`, so it actually stops consuming resources instead of
+ * merely being abandoned. When `next` does not support cancellation, the
+ * losing call cannot be truly cancelled; it is detached and its eventual
+ * settlement silenced, exactly as before #98.
  */
 export function withTimeout(options: TimeoutOptions): OracleMiddleware {
   const { timeoutMs } = options;
   return (next: RiskOracle): RiskOracle => ({
     async getScore(destination: string): Promise<number> {
+      const controller = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const inner = next.getScore(destination);
+      const inner = isCancellable(next)
+        ? next.getScoreCancellable(destination, controller.signal)
+        : next.getScore(destination);
       try {
         return await Promise.race([
           inner,
           new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () =>
-                reject(
-                  new OracleTimeoutError(
-                    `getScore("${destination}") timed out after ${timeoutMs}ms`,
-                  ),
-                ),
-              timeoutMs,
-            );
+            timer = setTimeout(() => {
+              controller.abort();
+              reject(
+                new OracleTimeoutError(`getScore("${destination}") timed out after ${timeoutMs}ms`),
+              );
+            }, timeoutMs);
           }),
         ]);
       } catch (err) {
         if (err instanceof OracleTimeoutError) {
-          // The abandoned call may still settle later; a late rejection must
-          // not surface as an unhandled promise rejection.
+          // The abandoned call may still settle later (immediately, if
+          // `next` honored the abort above; otherwise whenever it would
+          // have anyway) — a late rejection must not surface as an
+          // unhandled promise rejection either way.
           inner.catch(() => {});
         }
         throw err;

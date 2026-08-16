@@ -5,6 +5,7 @@ export {
   OracleSource,
   CacheStatus,
 } from './RiskOracle';
+export { CancellableRiskOracle, isCancellable } from './CancellableRiskOracle';
 export { StubOracle } from './StubOracle';
 export {
   validateDestination,
