@@ -267,7 +267,7 @@ grydlock-oracle-adapter/
 ├── stryker.config.json               ← Mutation testing config (src/ tree)
 │
 ├── .husky/commit-msg                 ← Local commit-msg hook, runs commitlint
-├── .github/workflows/ci.yml          ← CI: typecheck, lint, format check, test, build, bundle size, commitlint
+├── .github/workflows/ci.yml          ← CI: typecheck, lint, format check, test, bundle size, build, smoke tests, commitlint
 │
 ├── scripts/
 │   ├── bundle-size.mjs                ← esbuild-based bundle-size budget + tree-shaking check
