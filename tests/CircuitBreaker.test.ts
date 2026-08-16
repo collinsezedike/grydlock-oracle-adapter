@@ -261,4 +261,40 @@ describe('CircuitBreakerOracle: cancellation (issue #98)', () => {
     expect(circuitBreaker.getState()).toBe(CircuitBreakerState.CLOSED);
     expect(inner.callCount).toBeGreaterThanOrEqual(2); // the waiter made its own fresh call
   });
+
+  it('OPEN with cooldown not elapsed: cancelling a slow fallback rejects promptly instead of waiting for it', async () => {
+    const inner = new ControlledCancellableOracle();
+    let resolveFallback!: (v: number) => void;
+    let fallbackCalls = 0;
+    const config: CircuitBreakerConfig = {
+      failureThreshold: 1,
+      cooldownWindow: 5000,
+      isInfrastructureError: (error: unknown) => (error as Error).message === 'Network Error',
+      fallback: () => {
+        fallbackCalls++;
+        // The trip-to-OPEN call also routes through this fallback (CLOSED
+        // path calls handleFallback on an infra error too); resolve fast
+        // for that one so setup doesn't hang, and only go slow afterward,
+        // for the call this test actually means to cancel.
+        if (fallbackCalls === 1) return Promise.resolve(0);
+        return new Promise<number>((resolve) => {
+          resolveFallback = resolve;
+        });
+      },
+    };
+    const circuitBreaker = new CircuitBreakerOracle(inner, config);
+
+    // Trip to OPEN with cooldown not yet elapsed.
+    inner.getScore.mockRejectedValue(new Error('Network Error'));
+    await expect(circuitBreaker.getScore('addr1')).resolves.toBe(0);
+    expect(circuitBreaker.getState()).toBe(CircuitBreakerState.OPEN);
+
+    const ctrl = new AbortController();
+    const pending = circuitBreaker.getScoreCancellable('addr1', ctrl.signal);
+    expect(fallbackCalls).toBe(2); // the (now slow) fallback was invoked
+    ctrl.abort();
+
+    await expect(pending).rejects.toBeInstanceOf(OracleCancelledError);
+    resolveFallback(1); // let the abandoned fallback settle later so nothing dangles
+  });
 });

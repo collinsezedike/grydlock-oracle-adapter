@@ -3,7 +3,7 @@ import { OracleTimeoutError, withTimeout } from '../src/middleware/withTimeout';
 import { withCache } from '../src/middleware/withCache';
 import { compose } from '../src/OracleMiddleware';
 import { RiskOracle } from '../src/RiskOracle';
-import { CancellableRiskOracle } from '../src/CancellableRiskOracle';
+import { CancellableRiskOracle, isCancellable } from '../src/CancellableRiskOracle';
 import { OracleCancelledError } from '../src/OracleError';
 
 function delayedOracle(score: number, delayMs: number): RiskOracle {
@@ -140,6 +140,35 @@ describe('withTimeout', () => {
 
     // The abandoned call still settles on its own later — nothing throws.
     await vi.advanceTimersByTimeAsync(4000);
+  });
+
+  it('issue #98: exposes getScoreCancellable itself, so composition can propagate cancellation through it', async () => {
+    const inner = neverSettlingCancellableOracle();
+    const oracle = withTimeout({ timeoutMs: 10_000 })(inner);
+
+    expect(isCancellable(oracle)).toBe(true);
+    if (!isCancellable(oracle)) throw new Error('unreachable');
+
+    const ctrl = new AbortController();
+    const pending = oracle.getScoreCancellable('GDEST', ctrl.signal);
+    ctrl.abort();
+
+    await expect(pending).rejects.toBeInstanceOf(OracleCancelledError);
+    expect(inner.wasAborted()).toBe(true); // an *external* cancel reached the inner oracle
+  });
+
+  it('issue #98: getScoreCancellable still enforces its own timeout with OracleTimeoutError', async () => {
+    const inner = neverSettlingCancellableOracle();
+    const oracle = withTimeout({ timeoutMs: 1000 })(inner);
+    if (!isCancellable(oracle)) throw new Error('unreachable');
+
+    const ctrl = new AbortController();
+    const pending = oracle.getScoreCancellable('GDEST', ctrl.signal);
+    const assertion = expect(pending).rejects.toBeInstanceOf(OracleTimeoutError);
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+
+    expect(inner.wasAborted()).toBe(true);
   });
 });
 

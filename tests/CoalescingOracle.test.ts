@@ -254,4 +254,29 @@ describe('CoalescingOracle: cancellation (issue #98)', () => {
       process.off('unhandledRejection', listener);
     }
   });
+
+  it('regression: a new caller coalesces onto a still-running orphaned call when the inner is not cancellable', async () => {
+    // The inner here is a plain RiskOracle (no getScoreCancellable), so
+    // controller.abort() can never actually stop its real call — cancelling
+    // every attached caller only detaches interest, it does not free the
+    // resource. A caller arriving after that point must coalesce onto the
+    // still-running orphaned call rather than starting a wasteful duplicate.
+    const inner = new ControlledOracle();
+    const oracle = new CoalescingOracle(inner);
+    const destination = 'DEST_A';
+
+    const ctrlA = new AbortController();
+    const pA = oracle.getScoreCancellable(destination, ctrlA.signal);
+    ctrlA.abort();
+    await expect(pA).rejects.toBeInstanceOf(OracleCancelledError);
+    expect(inner.callCountByDestination.get(destination)).toBe(1);
+
+    const ctrlC = new AbortController();
+    const pC = oracle.getScoreCancellable(destination, ctrlC.signal);
+    expect(inner.callCountByDestination.get(destination)).toBe(1); // no second call yet
+
+    inner.resolve(destination, 123);
+    await expect(pC).resolves.toBe(123);
+    expect(inner.callCountByDestination.get(destination)).toBe(1); // still just the one real call
+  });
 });
