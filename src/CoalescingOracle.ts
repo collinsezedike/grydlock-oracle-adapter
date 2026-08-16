@@ -10,6 +10,14 @@ interface CancellableInFlightEntry {
   controller: AbortController;
   /** Count of callers currently coalesced on `promise` that have not yet cancelled. */
   attachedCount: number;
+  /**
+   * Whether `this.inner` actually implements `CancellableRiskOracle`, i.e.
+   * whether `controller.abort()` genuinely stops the underlying request
+   * rather than being a no-op. Determines whether it's safe to eagerly
+   * remove this entry once every caller has cancelled — see the doc at that
+   * call site below.
+   */
+  innerIsCancellable: boolean;
 }
 
 /**
@@ -102,10 +110,16 @@ export class CoalescingOracle implements RiskOracle, CancellableRiskOracle {
     if (!entry) {
       this.logger.debug('CoalescingOracle.cancellableInFlightStart', { destination });
       const controller = new AbortController();
-      const promise = isCancellable(this.inner)
+      const innerIsCancellable = isCancellable(this.inner);
+      const promise = innerIsCancellable
         ? this.inner.getScoreCancellable(destination, controller.signal)
         : this.inner.getScore(destination);
-      const newEntry: CancellableInFlightEntry = { promise, controller, attachedCount: 0 };
+      const newEntry: CancellableInFlightEntry = {
+        promise,
+        controller,
+        attachedCount: 0,
+        innerIsCancellable,
+      };
       entry = newEntry;
       this.cancellableInFlightByDestination.set(destination, newEntry);
 
@@ -133,12 +147,21 @@ export class CoalescingOracle implements RiskOracle, CancellableRiskOracle {
         settled = true;
         attachedEntry.attachedCount--;
         if (attachedEntry.attachedCount === 0) {
-          // Last attached caller cancelled: actually free the resource, and
-          // remove the entry immediately rather than waiting for `promise`
-          // to settle from the abort — otherwise a new caller arriving in
-          // that window would coalesce onto an already-doomed request.
           attachedEntry.controller.abort();
-          this.clearCancellableInFlight(destination, attachedEntry);
+          if (attachedEntry.innerIsCancellable) {
+            // Every caller has cancelled and the abort() above genuinely
+            // stops the resource: safe to remove the entry immediately
+            // rather than waiting for `promise` to settle from the abort —
+            // otherwise a new caller arriving in that window would coalesce
+            // onto an already-doomed request. If the inner oracle is *not*
+            // cancellable, `abort()` did nothing — the real request is
+            // still running — so the entry is deliberately left in place: a
+            // new caller should coalesce onto that still-live request
+            // instead of starting a wasteful duplicate one, and the
+            // top-level `promise.then(...)` cleanup above removes the entry
+            // once it genuinely settles.
+            this.clearCancellableInFlight(destination, attachedEntry);
+          }
         }
         signal.removeEventListener('abort', onAbort);
         reject(new OracleCancelledError('The oracle request was cancelled.', { destination }));
