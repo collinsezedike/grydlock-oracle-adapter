@@ -29,9 +29,12 @@ const PKG_NAME = 'grydlock-oracle-adapter';
 // Every export the barrel is expected to carry through to the built output;
 // kept in sync with src/index.ts by hand, since a build-time diff against
 // the source barrel would need TypeScript's own type information to do
-// properly, which esbuild's bundling here does not have.
+// properly, which esbuild's bundling here does not have. Type-only exports
+// (e.g. AllDetailed, and every plain `interface`) are deliberately excluded:
+// they compile away entirely and never exist on the built module's runtime
+// export object, so an `in` check on one would always fail here regardless
+// of whether the source-level re-export is correct.
 const EXPECTED_EXPORTS = [
-  'AllDetailed',
   'StubOracle',
   'DefaultOracle',
   'CoalescingOracle',
