@@ -30,39 +30,15 @@ const PKG_NAME = 'grydlock-oracle-adapter';
 // kept in sync with src/index.ts by hand, since a build-time diff against
 // the source barrel would need TypeScript's own type information to do
 // properly, which esbuild's bundling here does not have. Type-only exports
-// (e.g. AllDetailed, and every plain `interface`) are deliberately excluded:
-// they compile away entirely and never exist on the built module's runtime
-// export object, so an `in` check on one would always fail here regardless
-// of whether the source-level re-export is correct.
+// (every plain `interface`/`type`, e.g. AllDetailed) are deliberately
+// excluded: they compile away entirely and never exist on the built
+// module's runtime export object, so an `in` check on one would always
+// fail here regardless of whether the source-level re-export is correct.
+// `CircuitBreakerState` is the one enum in the barrel and *is* included:
+// unlike interfaces/types, a TypeScript enum compiles to a real runtime
+// object.
 const EXPECTED_EXPORTS = [
   'StubOracle',
-  'DefaultOracle',
-  'CoalescingOracle',
-  'ProvenanceOracle',
-  'CircuitBreakerOracle',
-  'CircuitBreakerState',
-  'defaultIsInfrastructureError',
-  'FallbackOracle',
-  'typedFallbackOracle',
-  'RiskOracleAggregator',
-  'weightedMedian',
-  'honestOrderBounds',
-  'computeDisagreement',
-  'compose',
-  'withCache',
-  'withProvenance',
-  'withRateLimit',
-  'joinBucketMaps',
-  'withTimeout',
-  'WithTimeoutError',
-  'OracleError',
-  'OracleUnavailableError',
-  'OracleTimeoutError',
-  'InvalidDestinationError',
-  'UnrecognizedDestinationError',
-  'ContractIncompatibilityError',
-  'QuorumNotMetError',
-  'toBatchOracle',
   'validateDestination',
   'encodeAssetCode',
   'assetCodeType',
@@ -75,6 +51,33 @@ const EXPECTED_EXPORTS = [
   'StrKeyError',
   'STRKEY_BASE32_ALPHABET',
   'noopLogger',
+  'ProvenanceOracle',
+  'toBatchOracle',
+  'OracleError',
+  'OracleUnavailableError',
+  'OracleTimeoutError',
+  'InvalidDestinationError',
+  'UnrecognizedDestinationError',
+  'ContractIncompatibilityError',
+  'QuorumNotMetError',
+  'CoalescingOracle',
+  'DefaultOracle',
+  'CircuitBreakerOracle',
+  'CircuitBreakerState',
+  'defaultIsInfrastructureError',
+  'FallbackOracle',
+  'typedFallbackOracle',
+  'RiskOracleAggregator',
+  'weightedMedian',
+  'honestOrderBounds',
+  'computeDisagreement',
+  'compose',
+  'withCache',
+  'withTimeout',
+  'withProvenance',
+  'withRateLimit',
+  'OracleRateLimitError',
+  'joinBucketMaps',
 ];
 
 function assertExports(label, moduleExports) {
