@@ -1,4 +1,4 @@
-/* global console, process */
+/* global console */
 /**
  * Dual-module build (issue #96).
  *
