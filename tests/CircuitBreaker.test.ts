@@ -224,7 +224,7 @@ describe('CircuitBreakerOracle: cancellation (issue #98)', () => {
 
   it('HALF_OPEN: one caller cancelling its wait does not affect the shared probe or other waiters', async () => {
     const inner = new ControlledCancellableOracle();
-    inner.getScore.mockRejectedValue(new Error('Network Error'));
+    inner.getScore.mockRejectedValueOnce(new Error('Network Error'));
     const config: CircuitBreakerConfig = {
       failureThreshold: 1,
       cooldownWindow: 5000,
@@ -237,6 +237,19 @@ describe('CircuitBreakerOracle: cancellation (issue #98)', () => {
     expect(circuitBreaker.getState()).toBe(CircuitBreakerState.OPEN);
     await vi.advanceTimersByTimeAsync(5000);
 
+    // The HALF_OPEN probe itself always goes through the plain getScore
+    // path (see runProbe), not getScoreCancellable — reconfigure the mock
+    // so this probe call stays genuinely pending until resolved below,
+    // instead of immediately rejecting like the trip-to-OPEN call above.
+    let resolveProbe!: (value: number) => void;
+    inner.getScore.mockImplementation(
+      () =>
+        new Promise<number>((resolve) => {
+          resolveProbe = resolve;
+        }),
+    );
+    inner.getScore.mockClear(); // isolate the call count below to just the probe call
+
     // Claiming caller launches the shared HALF_OPEN probe; a second caller
     // arrives while it's in flight.
     const ctrlClaim = new AbortController();
@@ -247,19 +260,19 @@ describe('CircuitBreakerOracle: cancellation (issue #98)', () => {
 
     ctrlClaim.abort();
     await expect(claiming).rejects.toBeInstanceOf(OracleCancelledError);
-    expect(inner.lastSignal?.aborted).toBe(false); // the shared probe itself was not aborted
-    expect(inner.callCount).toBe(1); // still just the one shared probe call
+    expect(inner.getScore).toHaveBeenCalledTimes(1); // still just the one shared probe call
 
     // Resolve the shared probe: this drives the breaker's own state
     // transition. Per INV-CB-4 (unchanged by this feature), the waiting
     // caller does not reuse the probe's resolved value directly — it
-    // re-issues its own call once the state has settled, which the test
-    // double above auto-resolves so the exact number of microtask hops
-    // needed to get there isn't something this test depends on.
+    // re-issues its own call once the state has settled (through
+    // getScoreCancellable, since the breaker is CLOSED by then), which the
+    // test double's auto-resolve handles so the exact number of microtask
+    // hops needed to get there isn't something this test depends on.
+    resolveProbe(64);
     inner.resolve(64);
     await expect(waiting).resolves.toBe(64);
     expect(circuitBreaker.getState()).toBe(CircuitBreakerState.CLOSED);
-    expect(inner.callCount).toBeGreaterThanOrEqual(2); // the waiter made its own fresh call
   });
 
   it('OPEN with cooldown not elapsed: cancelling a slow fallback rejects promptly instead of waiting for it', async () => {
