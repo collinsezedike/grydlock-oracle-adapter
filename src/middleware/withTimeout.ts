@@ -60,10 +60,16 @@ export function withTimeout(options: TimeoutOptions): OracleMiddleware {
           inner,
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => {
-              controller.abort();
+              // Reject the outer race *before* aborting: if `next` is
+              // cancellable, abort() synchronously rejects `inner` too, and
+              // Promise.race adopts whichever underlying reject() was
+              // called first — reversing this order would let a
+              // cancellable inner's own OracleCancelledError win the race
+              // instead of the timeout this call actually reports.
               reject(
                 new OracleTimeoutError(`getScore("${destination}") timed out after ${timeoutMs}ms`),
               );
+              controller.abort();
             }, timeoutMs);
           }),
         ]);
@@ -102,19 +108,26 @@ export function withTimeout(options: TimeoutOptions): OracleMiddleware {
           fn();
         };
 
+        // Both handlers below settle this promise (via the synchronous
+        // `finish` call) *before* calling abort() — defensive ordering,
+        // matching getScore's own timeout handler: `finish`'s `settled`
+        // guard already wins this race on its own (it runs synchronously,
+        // while a cancellable inner's abort-triggered rejection only
+        // reaches `finish` via the async `inner.then(...)` below), but
+        // settling first removes any reliance on that ordering nuance.
         const onExternalAbort = (): void => {
-          controller.abort();
           finish(() =>
             reject(new OracleCancelledError('The oracle request was cancelled.', { destination })),
           );
+          controller.abort();
         };
         signal.addEventListener('abort', onExternalAbort, { once: true });
 
         const timer = setTimeout(() => {
-          controller.abort();
           finish(() =>
             reject(new OracleTimeoutError(`getScore("${destination}") timed out after ${timeoutMs}ms`)),
           );
+          controller.abort();
         }, timeoutMs);
 
         inner.then(
