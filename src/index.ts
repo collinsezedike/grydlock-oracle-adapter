@@ -44,6 +44,7 @@ export {
   OracleErrorContext,
   OracleUnavailableError,
   OracleTimeoutError,
+  OracleCancelledError,
   InvalidDestinationError,
   UnrecognizedDestinationError,
   ContractIncompatibilityError,
