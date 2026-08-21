@@ -93,7 +93,6 @@ export function withTimeout(options: TimeoutOptions): OracleMiddleware {
 
       const result = new Promise<number>((resolve, reject) => {
         let settled = false;
-        let timer: ReturnType<typeof setTimeout> | undefined;
 
         const finish = (fn: () => void): void => {
           if (settled) return;
@@ -111,7 +110,7 @@ export function withTimeout(options: TimeoutOptions): OracleMiddleware {
         };
         signal.addEventListener('abort', onExternalAbort, { once: true });
 
-        timer = setTimeout(() => {
+        const timer = setTimeout(() => {
           controller.abort();
           finish(() =>
             reject(new OracleTimeoutError(`getScore("${destination}") timed out after ${timeoutMs}ms`)),
